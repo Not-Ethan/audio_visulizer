@@ -10,6 +10,14 @@ try:  # optional
     from ultralytics import YOLO
 except ImportError:  # pragma: no cover - optional dependency
     YOLO = None
+try:  # optional
+    from huggingface_hub import hf_hub_download
+except ImportError:  # pragma: no cover - optional dependency
+    hf_hub_download = None
+try:  # optional
+    from skimage.segmentation import slic
+except ImportError:  # pragma: no cover - optional dependency
+    slic = None
 
 
 @dataclass
@@ -22,14 +30,43 @@ class Shard:
 
 
 class SegmentationEngine:
-    def __init__(self, backend: str = "kmeans", model_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        backend: str = "kmeans",
+        model_path: Optional[str] = None,
+        hf_model_id: Optional[str] = None,
+        hf_filename: str = "yolov8n-seg.pt",
+        hf_cache_dir: Optional[str] = None,
+    ) -> None:
         self.backend = backend
         self.model = None
-        if backend == "yolo" and YOLO is not None and model_path:
-            self.model = YOLO(model_path)
+        if backend == "yolo" and YOLO is not None:
+            resolved_path = model_path
+            if resolved_path is None and hf_model_id:
+                if hf_hub_download is None:
+                    raise RuntimeError("huggingface_hub is required for yolo_hf_model_id.")
+                resolved_path = hf_hub_download(
+                    repo_id=hf_model_id,
+                    filename=hf_filename,
+                    cache_dir=hf_cache_dir,
+                )
+            if resolved_path:
+                self.model = YOLO(resolved_path)
 
-    def segment(self, image: np.ndarray, clusters: int, min_area: int, max_shards: int) -> List[Shard]:
-        if self.backend == "yolo" and self.model is not None:
+    def segment(
+        self,
+        image: np.ndarray,
+        clusters: int,
+        min_area: int,
+        max_shards: int,
+        slic_compactness: float = 10.0,
+        slic_sigma: float = 1.0,
+    ) -> List[Shard]:
+        if self.backend == "slic":
+            if slic is None:
+                raise RuntimeError("scikit-image is required for segmentation_backend='slic'.")
+            shards = self._segment_slic(image, clusters, min_area, slic_compactness, slic_sigma)
+        elif self.backend == "yolo" and self.model is not None:
             shards = self._segment_yolo(image, min_area)
         else:
             shards = self._segment_kmeans(image, clusters, min_area)
@@ -88,6 +125,37 @@ class SegmentationEngine:
                     shards.append(shard)
         return shards
 
+    def _segment_slic(
+        self,
+        image: np.ndarray,
+        segments: int,
+        min_area: int,
+        compactness: float,
+        sigma: float,
+    ) -> List[Shard]:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        rgb_float = rgb.astype(np.float32) / 255.0
+        segments = max(2, segments)
+        labels = slic(
+            rgb_float,
+            n_segments=segments,
+            compactness=compactness,
+            sigma=sigma,
+            start_label=0,
+            convert2lab=True,
+            enforce_connectivity=True,
+        )
+
+        shards: List[Shard] = []
+        for seg_id in np.unique(labels):
+            seg_mask = (labels == seg_id)
+            if seg_mask.sum() < min_area:
+                continue
+            shard = _mask_to_shard(image, seg_mask.astype(np.uint8), min_area)
+            if shard is not None:
+                shards.append(shard)
+        return shards
+
 
 def _mask_to_shard(image: np.ndarray, mask: np.ndarray, min_area: int) -> Optional[Shard]:
     if mask.sum() < min_area:
@@ -122,3 +190,23 @@ def _mask_to_shard(image: np.ndarray, mask: np.ndarray, min_area: int) -> Option
         centroid=centroid,
         mean_color=mean_color,
     )
+
+
+def merge_shards(
+    image: np.ndarray,
+    shards: List[Shard],
+    include_remainder: bool = False,
+) -> Optional[Shard]:
+    h, w = image.shape[:2]
+    union_mask = np.zeros((h, w), dtype=np.uint8)
+    for shard in shards:
+        x0, y0, x1, y1 = shard.bbox
+        alpha = shard.rgba[:, :, 3]
+        union_mask[y0:y1, x0:x1] |= (alpha > 0).astype(np.uint8)
+
+    if include_remainder:
+        union_mask[:, :] = 1
+
+    if union_mask.sum() == 0:
+        return None
+    return _mask_to_shard(image, union_mask, 0)

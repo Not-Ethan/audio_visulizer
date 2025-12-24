@@ -18,7 +18,8 @@ pip install -r requirements.txt
 ```
 
 Optional:
-- **YOLOv8 segmentation**: install `ultralytics` and set `RenderConfig.segmentation_backend="yolo"` with a local model path.
+- **YOLOv8 segmentation**: install `ultralytics` and set `RenderConfig.segmentation_backend="yolo"` with a local model path or Hugging Face model ID.
+- **SLIC superpixels**: install `scikit-image` and set `RenderConfig.segmentation_backend="slic"` for organic, contiguous chunks.
 
 ## Project Structure
 ```
@@ -71,6 +72,7 @@ For each render, the pipeline produces:
 - **Mode B (Video)**: sample a frame every N seconds
 - **Segmentation**:
   - Optional YOLOv8-seg (if configured)
+  - SLIC superpixels (scikit-image) for contiguous, organic chunks
   - Fallback K-means + connected components
 - **Shard metadata**: area, centroid, mean RGB color
 
@@ -92,6 +94,15 @@ Default parameters live in `audio_vis/config.py`:
 - FPS, resolution, sample rate for video frames
 - Segmentation settings (backend, clusters, shard area)
 - Mosaic behavior (accumulative vs strobe, ghost decay, glitch offset)
+YOLOv8 (Hugging Face) example:
+```python
+from audio_vis.config import RenderConfig
+config = RenderConfig(
+    segmentation_backend="yolo",
+    yolo_hf_model_id="Ultralytics/YOLOv8",
+    yolo_hf_filename="yolov8n-seg.pt",
+)
+```
 
 ## Notes
 - The K-means segmentation fallback is fully local and does not require GPU.

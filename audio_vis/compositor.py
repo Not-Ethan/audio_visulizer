@@ -40,7 +40,8 @@ def render_shards(
 
 
 def apply_ghosting(current: np.ndarray, previous: np.ndarray, decay: float) -> np.ndarray:
-    output = current.astype(np.float32) + previous.astype(np.float32) * decay
+    decay = float(np.clip(decay, 0.0, 1.0))
+    output = current.astype(np.float32) * (1.0 - decay) + previous.astype(np.float32) * decay
     return np.clip(output, 0, 255).astype(np.uint8)
 
 

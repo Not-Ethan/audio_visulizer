@@ -13,7 +13,7 @@ from .assets import load_frames_from_video, load_images_from_dir
 from .audio_features import AudioMap, BeatInfo, MeasureInfo, build_audio_map
 from .compositor import apply_ghosting, partition_shards, render_shards, sort_shards
 from .config import RenderConfig
-from .shards import SegmentationEngine, Shard
+from .shards import SegmentationEngine, Shard, merge_shards
 from .video_io import create_video_writer
 
 
@@ -84,7 +84,13 @@ def run_pipeline(
     else:
         assets = load_frames_from_video(video_path, size, config.sample_every_sec)
 
-    segmenter = SegmentationEngine(config.segmentation_backend, config.yolo_model_path)
+    segmenter = SegmentationEngine(
+        config.segmentation_backend,
+        config.yolo_model_path,
+        config.yolo_hf_model_id,
+        config.yolo_hf_filename,
+        config.yolo_hf_cache_dir,
+    )
     shard_sets: List[List[Shard]] = []
     for asset in assets:
         shards = segmenter.segment(
@@ -92,6 +98,8 @@ def run_pipeline(
             clusters=config.segmentation_clusters,
             min_area=config.min_shard_area,
             max_shards=config.max_shards,
+            slic_compactness=config.segmentation_slic_compactness,
+            slic_sigma=config.segmentation_slic_sigma,
         )
         shard_sets.append(shards)
 
@@ -102,7 +110,8 @@ def run_pipeline(
     rng = np.random.default_rng()
 
     current_measure_index = -1
-    buckets: List[List[Shard]] = []
+    buckets: List[Optional[Shard]] = []
+    current_asset = assets[0]
 
     for frame_idx in tqdm(range(frame_count), desc="Rendering", unit="frame"):
         timestamp = frame_idx / config.fps
@@ -114,16 +123,25 @@ def run_pipeline(
             current_measure_index = measure.index
             asset_index = measure.index % len(shard_sets)
             shards = shard_sets[asset_index]
+            current_asset = assets[asset_index]
             center = (config.width / 2.0, config.height / 2.0)
             sort_mode = _select_sort_mode(measure.index)
             sorted_shards = sort_shards(shards, sort_mode, center)
-            buckets = partition_shards(sorted_shards, len(measure.beats))
+            shard_buckets = partition_shards(sorted_shards, len(measure.beats))
+            include_remainder = config.segmentation_backend == "yolo"
+            buckets = []
+            for idx, bucket in enumerate(shard_buckets):
+                buckets.append(
+                    merge_shards(
+                        current_asset,
+                        bucket,
+                        include_remainder=include_remainder and idx == len(shard_buckets) - 1,
+                    )
+                )
 
         bucket_index = beat.index - measure.beats[0].index
-        if config.accumulative:
-            active_shards = [shard for bucket in buckets[: bucket_index + 1] for shard in bucket]
-        else:
-            active_shards = buckets[bucket_index] if buckets else []
+        shard = buckets[bucket_index] if bucket_index < len(buckets) else None
+        active_shards = [shard] if shard is not None else []
 
         canvas = np.zeros((config.height, config.width, 3), dtype=np.uint8)
         max_offset = int(config.glitch_max_offset * beat.intensity)
